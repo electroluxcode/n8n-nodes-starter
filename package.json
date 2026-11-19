@@ -1,6 +1,6 @@
 {
   "name": "@creative-x-lab/n8n-nodes-17track",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "n8n community node for 17TRACK cross-border e-commerce order tracking",
   "license": "MIT",
   "homepage": "https://github.com/electroluxcode/n8n-nodes-17track",
