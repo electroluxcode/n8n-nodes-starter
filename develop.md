@@ -1,94 +1,119 @@
-# 开发者注意事项(Developer Notes)
+# Developer Notes
 
-> 本文档记录 n8n-nodes-17track 开发与发版过程中的关键约定与踩坑记录。
-> 新贡献者必读;改 CI / 发版流程前先通读。
+> Key conventions and gotchas collected while building and shipping the
+> n8n-nodes-17track package. Read this before touching CI or the release flow.
 
-## 1. 环境要求
+## 1. Environment
 
-| 工具 | 版本 | 说明 |
+| Tool | Version | Notes |
 |---|---|---|
-| Node.js | **20 或 22** | CI 用 22(pnpm 11 要求 ≥22.13);Node 24 会被 n8n 运行时拒绝 |
-| pnpm | 11.x | `packageManager` 字段锁定;pnpm 11 依赖 node:sqlite,Node 20 下本地跑不了(用 Node 22 跑 pnpm 命令) |
-| npm | 仅用于发布后的安装验证 | 不作为包管理器 |
+| Node.js | **20 or 22** | CI uses 22 (pnpm 11 requires ≥22.13); Node 24 is rejected by the n8n runtime |
+| pnpm | 11.x | Locked via the `packageManager` field; pnpm 11 uses `node:sqlite`, so it cannot run on Node 20 locally — run pnpm commands under Node 22 |
+| npm | verification only | Not used as the package manager |
 
-**注意**:`nvm use` 切换全局 Node 后,当前 shell 需 `hash -r` 刷新;CI 的 Node 版本由 release.yml 的 `actions/setup-node` 控制,与本地无关。
+**Gotcha**: after `nvm use`, refresh the current shell with `hash -r`. The CI Node
+version is controlled by `actions/setup-node` in release.yml and is independent of
+your local version.
 
-## 2. 构建
+## 2. Build
 
 ```bash
-pnpm install          # 生成/校验 pnpm-lock.yaml
+pnpm install
 pnpm run build        # tsc -p tsconfig.json + node scripts/copy-assets.js
 ```
 
-- **不要用 @n8n/node-cli 构建**:它的依赖树会拉进 `@n8n/expression-runtime → isolated-vm`(原生编译),在 CI 上必挂(历史上连续 3 次 Release 失败的元凶)。纯 `tsc` 就够了。
-- **svg 图标必须手动复制**:`tsc` 不会拷贝非 TS 资源,`scripts/copy-assets.js` 负责把
-  `nodes/SeventeenTrack/seventeenTrack.svg`、`seventeenTrack.dark.svg`、`credentials/seventeenTrackApi.svg`
-  复制进 `dist/`。**新增图标后忘记跑 copy-assets,面板图标就是破图。**
-- credential 的 `icon` 字段只接受字符串(`'file:xxx.svg' as const`);只有 **节点** 的 icon 支持 `{light, dark}` 对象。
+- **Do not build with @n8n/node-cli**: its dependency tree pulls
+  `@n8n/expression-runtime → isolated-vm` (native build), which broke three Release
+  runs in a row. Plain `tsc` is enough.
+- **SVG icons must be copied manually**: `tsc` does not copy non-TS assets.
+  `scripts/copy-assets.js` copies `nodes/SeventeenTrack/seventeenTrack.svg`,
+  `seventeenTrack.dark.svg` and `credentials/seventeenTrackApi.svg` into `dist/`.
+  Forgetting this step = broken icon in the node panel.
+- The credential `icon` field only accepts a string literal (`'file:xxx.svg' as const`);
+  only the **node** icon supports the `{light, dark}` object form.
 
-## 3. 凭证与认证(最大的坑)
+## 3. Credentials and authentication (biggest gotcha)
 
-- **程序式节点(programmatic)必须显式调用 `await this.getCredentials('seventeenTrackApi')`**——
-  否则 n8n 不会把凭证的 `authenticate`(generic/headers)注入到 `helpers.httpRequest` 请求里,
-  所有请求都会 401。这是本项目历史上最大的坑(mock 测试手动注入 header 掩盖了它)。
-- 认证采用**显式 header**:execute 里取 `credentials.apiKey` 后直接设置 `17token` 头,
-  不依赖 n8n 的 generic-auth 自动注入(双保险)。
-- `credentials.apiKey` 对应环境测试:凭证保存时 n8n 会按 credential 的 `test` 块发起连通性校验。
+- **Programmatic nodes MUST call `await this.getCredentials('seventeenTrackApi')`** —
+  otherwise n8n does not inject the credential's `authenticate` (generic/headers) into
+  `helpers.httpRequest` requests, and every request returns 401. This was the biggest
+  gotcha in the project's history (the mock harness masked it by injecting headers manually).
+- Auth uses an **explicit header**: `execute()` reads `credentials.apiKey` and sets the
+  `17token` header directly, instead of relying on n8n's generic-auth auto-injection (belt and braces).
+- The credential `test` block performs a live connectivity check against `/getquota` on save.
 
-## 4. 沙箱与正式环境
+## 4. Sandbox vs production
 
-- 代码内**唯一默认值**是正式环境:`https://api.17track.net/track/v2.4`(见 `nodes/SeventeenTrack/SeventeenTrack.node.ts` 的 `API_BASE`)。
-- 沙箱测试通过环境变量注入,**绝不写入代码**:
+- The code contains **a single default**: production `https://api.17track.net/track/v2.4`
+  (see `API_BASE` in `nodes/SeventeenTrack/SeventeenTrack.node.ts`).
+- Sandbox testing injects via env vars, **never commit them**:
   ```bash
   SEVENTEEN_TRACK_API_BASE="https://test-api-1.17track.net/track/v2.4"
   SEVENTEEN_TRACK_API_KEY="<sandbox key>"
   ```
-- API key 一律走环境变量/凭证,**任何 key 都不允许提交进仓库**(含 README、截图、日志)。
+- API keys always travel via env vars/credentials. **Never commit a key** (README,
+  screenshots and logs included).
 
-## 5. 17TRACK 业务规则(错误码速查)
+## 5. 17TRACK business rules (error code cheat sheet)
 
-| 码 | 含义 | 处理 |
+| Code | Meaning | Handling |
 |---|---|---|
-| `-18019901` | 单号已注册,无需重复注册 | 正常,跳过即可 |
-| `-18019902` | 单号未注册,请先注册 | **先调 register_trackings 再查详情** |
-| `-18019905` | retrack 每个单号只能一次 | 业务规则,正常 |
-| `-18019909` | 暂无轨迹信息 | 单号刚注册,稍后再查 |
-| `-18019804` | 新旧承运商相同 | 业务规则,正常 |
-| `-18010204` | 账号未配置 webhook | push 前先配置 |
-| `-18019912` | 实时查询接口未授权 | 需在 17TRACK 后台开通(付费能力) |
-| `-18010001/02/04/05` | 认证失败 | 检查 17token |
-| `-18019907/08` | 限流 | 退避重试 |
-| `-18010003/-18019815~17` | 上游错误 | 稍后重试 |
+| `-18019901` | Number already registered | Expected, skip |
+| `-18019902` | Number not registered | **Call register_trackings first** |
+| `-18019905` | retrack allowed only once per number | Business rule, expected |
+| `-18019909` | No tracking information yet | Just registered, retry later |
+| `-18019804` | Old and new carrier are the same | Business rule, expected |
+| `-18010204` | Account has no webhook configured | Configure before push |
+| `-18019912` | Realtime query interface not authorized | Enable in the 17TRACK backend (paid capability) |
+| `-18010001/02/04/05` | Authentication failed | Check the 17token |
+| `-18019907/08` | Rate limited | Back off and retry |
+| `-18010003/-18019815~17` | Upstream error | Retry later |
 
-行为规则:details 只查**已注册**单号;retrack 一次性;change-carrier 每单 5 次;批量上限 40。
+Behavior: details only queries **registered** numbers; retrack is one-shot;
+change-carrier allows 5 changes per number; batch limit is 40.
 
-## 6. CI / 发版(Semantic Release)
+## 6. CI / release (semantic-release)
 
-- **发版全自动**:`push main` → 分析提交 → 定版本 → CHANGELOG → npm publish(带 provenance)→ tag → GitHub Release。
-- **提交信息必须遵循 Conventional Commits**(`feat:` / `fix:` / `docs:` / `chore:`)——`feat`/`fix` 触发发版,`docs`/`chore` 不触发。
-- `pnpm-lock.yaml` **必须提交**(CI 用 `pnpm install --frozen-lockfile`);**不要加进 .gitignore**(踩过:lock 被忽略后 CI 装不上 semantic-release)。
-- CI 安装用 `pnpm install --frozen-lockfile`;**不要加 --ignore-scripts**(依赖树已无原生模块,不需要了;那是 node-cli 时代的 hack)。
-- git push 认证:semantic-release 用内置 `GITHUB_TOKEN`(release.yml 已声明 `contents: write`)。
-  仓库 **Settings → Actions → General → Workflow permissions 必须是 "Read and write"**——
-  被设为 read 时内置 token 推送必挂(报 Invalid username or token),且这是仓库级设置,改 workflow 文件无效。
-- NPM_TOKEN 用 **Automation 类型**(绕过 npm 2FA;Publish 类型在 2FA auth-and-writes 模式下会报 EOTP)。
-- scoped 包发布:`publishConfig.access: public` 已配置,勿删。
+- **Fully automated release**: `push main` → analyze commits → version → CHANGELOG →
+  npm publish (provenance-signed) → tag → GitHub Release.
+- **Commit messages MUST follow Conventional Commits** (`feat:` / `fix:` / `docs:` /
+  `chore:`) — `feat`/`fix` trigger a release, `docs`/`chore` do not.
+- `pnpm-lock.yaml` **must be committed** (CI runs `pnpm install --frozen-lockfile`).
+  **Never add it to .gitignore** (gotcha: an ignored lock meant CI could not install
+  semantic-release).
+- CI install uses `pnpm install --frozen-lockfile`; **do not add --ignore-scripts**
+  (the dependency tree no longer contains native modules — that was a node-cli-era hack).
+- Git push authentication: semantic-release uses the built-in `GITHUB_TOKEN`
+  (release.yml declares `contents: write`).
+  **Repo Settings → Actions → General → Workflow permissions MUST be "Read and write"** —
+  set to read, the built-in token push fails with Invalid username or token, and no
+  workflow-file change can fix it.
+- NPM_TOKEN must be an **Automation type** token (bypasses npm 2FA; Publish tokens
+  hit EOTP under 2FA auth-and-writes mode).
+- Scoped publish: `publishConfig.access: public` is configured — do not remove.
 
-## 7. 版本与 tag
+## 7. Versioning and tags
 
-- 发版 tag 由 semantic-release 自动创建,**不要手工打 tag**(会与自动发版冲突:tag already exists)。
-- 手工误打的 tag 用 `git push origin :refs/tags/<tag>` 删除远端后即可重新发版。
+- Release tags are created automatically by semantic-release. **Never create release
+  tags manually** (a pre-existing tag makes the release fail with tag already exists,
+  and a fake tag makes semantic-release believe a version was already published —
+  both happened in this repo's history).
+- To remove a bogus tag: `git push origin :refs/tags/<tag>`, then re-run the Release
+  workflow.
 
-## 8. 测试
+## 8. Testing
 
-- mock-harness:直接实例化节点类、mock `IExecuteFunctions`、真实调沙箱(见主仓库 `.tools/n8n-e2e/` 思路)。
-- 全量 e2e:按官方 11 端点逐个走通,注意**每次跑完恢复测试账号状态**(注册过的删掉/恢复)。
-- 测试单号(沙箱):`4PX3003131010785CN` `4PX3003130266473CN` `UL447201805YP` `VR958617555YP`。
-- 证据记录:`docs/e2e-evidence.md`(主仓库)。
+- Mock harness: instantiate the node class, mock `IExecuteFunctions`, hit the live
+  sandbox (see the `.tools/n8n-e2e/` approach in the main project repo).
+- Full e2e: walk all 11 official endpoints and **restore the test account state
+  afterwards** (delete what was registered).
+- Sandbox test numbers: `4PX3003131010785CN` `4PX3003130266473CN` `UL447201805YP`
+  `VR958617555YP`.
+- Evidence log: `docs/e2e-evidence.md` (in the main project repo).
 
-## 9. 官方文档索引
+## 9. Official docs
 
-- 17TRACK Tracking API v2.4(11 端点): https://asset.17track.net/api/document/v2.4_zh/index.html
-- API Key 管理: https://api.17track.net/admin/settings
-- Dify 插件 output_schema 规范: https://docs.dify.ai/en/develop-plugin/features-and-specs/plugin-types/tool
-- 参考实现(领域对齐来源): https://github.com/oomol-lab/open-connector
+- 17TRACK Tracking API v2.4 (11 endpoints): https://asset.17track.net/api/document/v2.4_zh/index.html
+- API key management: https://api.17track.net/admin/settings
+- Dify plugin output_schema spec: https://docs.dify.ai/en/develop-plugin/features-and-specs/plugin-types/tool
+- Reference implementation (domain alignment source): https://github.com/oomol-lab/open-connector
